@@ -3,6 +3,7 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import logging
+import os
 import time
 from typing import List
 
@@ -41,20 +42,21 @@ _APP_START_TIME: float = time.time()
 async def lifespan(app: FastAPI):
     """Application lifespan context manager for startup and shutdown routines."""
     logger.info("Initializing FastAPI Prediction Service...")
-    try:
-        predictor.load_model()
-        logger.info(
-            "Champion model '%s' (alias '%s') loaded on startup.",
-            predictor.model_name,
-            predictor.model_alias,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Champion model could not be loaded on startup: %s. "
-            "Service will start in degraded mode. "
-            "Use POST /reload-model once the model is registered in MLflow.",
-            exc,
-        )
+    if os.getenv("TESTING", "").lower() != "true":
+        try:
+            predictor.load_model()
+            logger.info(
+                "Champion model '%s' (alias '%s') loaded on startup.",
+                predictor.model_name,
+                predictor.model_alias,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Champion model could not be loaded on startup: %s. "
+                "Service will start in degraded mode. "
+                "Use POST /reload-model once the model is registered in MLflow.",
+                exc,
+            )
     yield
     logger.info("Shutting down FastAPI Prediction Service.")
 

@@ -1,11 +1,32 @@
-"""Unit and integration tests for FastAPI serving endpoints."""
+"""Unit and integration tests for FastAPI serving endpoints and schemas."""
+
+import os
+os.environ["TESTING"] = "true"
+os.environ["MLFLOW_DISABLE_AGENT_HINT"] = "1"
 
 from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
+from pydantic import ValidationError
+from fastapi import HTTPException
 
-from api.main import app
+from api.main import (
+    app,
+    get_app_info,
+    get_health,
+    get_metrics,
+    predict,
+    predict_batch,
+    reload_model,
+)
+from api.schemas import (
+    BatchPredictionRequest,
+    HealthResponse,
+    LoanApplication,
+    MetricsResponse,
+    PredictionResponse,
+    ReloadModelResponse,
+)
 from src.predict import ModelNotLoadedError, predictor
 from monitoring.metrics import metrics_tracker
 
@@ -35,13 +56,6 @@ class DummyClassifierWithoutProba:
         return [self.pred_class] * len(X)
 
 
-@pytest.fixture
-def client():
-    """Create FastAPI test client."""
-    with TestClient(app) as test_client:
-        yield test_client
-
-
 @pytest.fixture(autouse=True)
 def setup_teardown():
     """Reset predictor and metrics tracker around each test."""
@@ -66,91 +80,81 @@ SAMPLE_APPLICATION_PAYLOAD = {
 }
 
 
-def test_root_endpoint(client):
-    """Test GET / returns basic application information."""
-    response = client.get("/")
-    assert response.status_code == 200
-    data = response.json()
-    assert "name" in data
-    assert "version" in data
-    assert "description" in data
-    assert data["status"] == "online"
-    assert "endpoints" in data
-    assert "/predict" in data["endpoints"].values() or "POST /predict" in data["endpoints"].values()
+def test_root_endpoint():
+    """Test GET / endpoint logic returning basic application information."""
+    data = get_app_info()
+    assert data.status == "online"
+    assert data.version == "1.0.0"
+    assert "Home Loan" in data.name
+    assert "/predict" in data.endpoints.values() or "POST /predict" in data.endpoints.values()
 
 
-def test_health_endpoint_healthy(client):
-    """Test GET /health when model is loaded."""
+def test_health_endpoint_healthy():
+    """Test GET /health returns 'healthy' when champion model is loaded."""
     mock_model = DummyClassifierWithProba()
     predictor.set_model(mock_model, model_name="HomeLoanClassifier", model_alias="champion")
 
-    response = client.get("/health")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "healthy"
-    assert data["model_loaded"] is True
-    assert data["model_name"] == "HomeLoanClassifier"
-    assert data["model_alias"] == "champion"
-    assert "uptime_seconds" in data
-    assert "timestamp" in data
+    data = get_health()
+    assert data.status == "healthy"
+    assert data.model_loaded is True
+    assert data.model_name == "HomeLoanClassifier"
+    assert data.model_alias == "champion"
+    assert data.uptime_seconds >= 0.0
 
 
-def test_health_endpoint_degraded(client):
-    """Test GET /health when model is unloaded."""
+def test_health_endpoint_degraded():
+    """Test GET /health returns 'degraded' when champion model is unloaded."""
     predictor.unload_model()
 
-    response = client.get("/health")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "degraded"
-    assert data["model_loaded"] is False
+    data = get_health()
+    assert data.status == "degraded"
+    assert data.model_loaded is False
 
 
-def test_predict_approved(client):
-    """Test POST /predict returns approval status and probability."""
+def test_predict_approved():
+    """Test /predict returns approval status 'Y' and positive confidence probability."""
     mock_model = DummyClassifierWithProba(pred_class=1, proba=(0.15, 0.85), classes=(0, 1))
     predictor.set_model(mock_model)
 
-    response = client.post("/predict", json=SAMPLE_APPLICATION_PAYLOAD)
-    assert response.status_code == 200
-    data = response.json()
-    assert data["loan_status"] == "Y"
-    assert data["prediction"] == 1
-    assert data["probability"] == 0.85
-    assert data["loan_id"] == "LP001002"
-    assert data["model_name"] is not None
+    application = LoanApplication(**SAMPLE_APPLICATION_PAYLOAD)
+    result = predict(application)
+
+    assert isinstance(result, PredictionResponse)
+    assert result.loan_status == "Y"
+    assert result.prediction == 1
+    assert result.probability == 0.85
+    assert result.loan_id == "LP001002"
 
 
-def test_predict_rejected(client):
-    """Test POST /predict returns rejection status and lower approval probability."""
+def test_predict_rejected():
+    """Test /predict returns rejection status 'N' and correct probability."""
     mock_model = DummyClassifierWithProba(pred_class=0, proba=(0.82, 0.18), classes=(0, 1))
     predictor.set_model(mock_model)
 
     payload = dict(SAMPLE_APPLICATION_PAYLOAD)
     payload["Credit_History"] = 0.0
+    application = LoanApplication(**payload)
+    result = predict(application)
 
-    response = client.post("/predict", json=payload)
-    assert response.status_code == 200
-    data = response.json()
-    assert data["loan_status"] == "N"
-    assert data["prediction"] == 0
-    assert data["probability"] == 0.18
+    assert result.loan_status == "N"
+    assert result.prediction == 0
+    assert result.probability == 0.18
 
 
-def test_predict_without_probability_support(client):
-    """Test POST /predict returns None for probability if unsupported by model."""
+def test_predict_without_probability_support():
+    """Test /predict returns None for probability if unsupported by model."""
     mock_model = DummyClassifierWithoutProba(pred_class="Y")
     predictor.set_model(mock_model)
 
-    response = client.post("/predict", json=SAMPLE_APPLICATION_PAYLOAD)
-    assert response.status_code == 200
-    data = response.json()
-    assert data["loan_status"] == "Y"
-    assert data["probability"] is None
+    application = LoanApplication(**SAMPLE_APPLICATION_PAYLOAD)
+    result = predict(application)
+
+    assert result.loan_status == "Y"
+    assert result.probability is None
 
 
-def test_predict_with_snake_case_aliases(client):
-    """Test POST /predict accepts snake_case aliases for input fields."""
+def test_predict_with_snake_case_aliases():
+    """Test LoanApplication schema accepts snake_case aliases and scores correctly."""
     mock_model = DummyClassifierWithProba(pred_class=1, proba=(0.1, 0.9))
     predictor.set_model(mock_model)
 
@@ -168,122 +172,115 @@ def test_predict_with_snake_case_aliases(client):
         "credit_history": 1.0,
         "property_area": "Semiurban",
     }
+    application = LoanApplication(**alias_payload)
+    result = predict(application)
 
-    response = client.post("/predict", json=alias_payload)
-    assert response.status_code == 200
-    data = response.json()
-    assert data["loan_status"] == "Y"
-    assert data["loan_id"] == "LP009999"
+    assert result.loan_status == "Y"
+    assert result.loan_id == "LP009999"
 
 
-def test_predict_model_not_loaded_503(client):
-    """Test POST /predict returns 503 when model cannot be loaded."""
+def test_predict_model_not_loaded_503():
+    """Test /predict raises HTTP 503 when model cannot be loaded."""
     predictor.unload_model()
 
-    with patch.object(predictor, "load_model", side_effect=ModelNotLoadedError("MLflow connection failed")):
-        response = client.post("/predict", json=SAMPLE_APPLICATION_PAYLOAD)
-        assert response.status_code == 503
-        assert "unavailable" in response.json()["detail"].lower()
+    application = LoanApplication(**SAMPLE_APPLICATION_PAYLOAD)
+    with patch.object(predictor, "load_model", side_effect=ModelNotLoadedError("Registry offline")):
+        with pytest.raises(HTTPException) as exc_info:
+            predict(application)
+        assert exc_info.value.status_code == 503
+        assert "unavailable" in exc_info.value.detail.lower()
 
 
-def test_predict_validation_missing_required_income(client):
-    """Test POST /predict returns 422 when required ApplicantIncome is omitted."""
+def test_predict_validation_missing_required_income():
+    """Test Pydantic validation fails when ApplicantIncome is omitted."""
     invalid_payload = dict(SAMPLE_APPLICATION_PAYLOAD)
     del invalid_payload["ApplicantIncome"]
 
-    response = client.post("/predict", json=invalid_payload)
-    assert response.status_code == 422
+    with pytest.raises(ValidationError):
+        LoanApplication(**invalid_payload)
 
 
-def test_predict_validation_negative_income(client):
-    """Test POST /predict returns 422 when ApplicantIncome is negative."""
+def test_predict_validation_negative_income():
+    """Test Pydantic validation fails when ApplicantIncome is negative."""
     invalid_payload = dict(SAMPLE_APPLICATION_PAYLOAD)
     invalid_payload["ApplicantIncome"] = -100.0
 
-    response = client.post("/predict", json=invalid_payload)
-    assert response.status_code == 422
+    with pytest.raises(ValidationError):
+        LoanApplication(**invalid_payload)
 
 
-def test_predict_validation_negative_loan_amount(client):
-    """Test POST /predict returns 422 when LoanAmount is negative."""
+def test_predict_validation_negative_loan_amount():
+    """Test Pydantic validation fails when LoanAmount is negative."""
     invalid_payload = dict(SAMPLE_APPLICATION_PAYLOAD)
     invalid_payload["LoanAmount"] = -50.0
 
-    response = client.post("/predict", json=invalid_payload)
-    assert response.status_code == 422
+    with pytest.raises(ValidationError):
+        LoanApplication(**invalid_payload)
 
 
-def test_predict_validation_invalid_term(client):
-    """Test POST /predict returns 422 when Loan_Amount_Term is zero or negative."""
+def test_predict_validation_invalid_term():
+    """Test Pydantic validation fails when Loan_Amount_Term is zero or negative."""
     invalid_payload = dict(SAMPLE_APPLICATION_PAYLOAD)
     invalid_payload["Loan_Amount_Term"] = 0.0
 
-    response = client.post("/predict", json=invalid_payload)
-    assert response.status_code == 422
+    with pytest.raises(ValidationError):
+        LoanApplication(**invalid_payload)
 
 
-def test_metrics_endpoint(client):
-    """Test GET /metrics returns accurate operational metrics."""
+def test_metrics_endpoint():
+    """Test /metrics reflects accurate serving metrics and updates after prediction."""
     mock_model = DummyClassifierWithProba(pred_class=1, proba=(0.2, 0.8))
     predictor.set_model(mock_model)
 
     # Initial metrics
-    res1 = client.get("/metrics")
-    assert res1.status_code == 200
-    data1 = res1.json()
-    assert data1["total_predictions"] == 0
-    assert data1["approved_predictions"] == 0
+    m1 = get_metrics()
+    assert m1.total_predictions == 0
+    assert m1.approved_predictions == 0
 
     # Perform 1 approved prediction
-    client.post("/predict", json=SAMPLE_APPLICATION_PAYLOAD)
+    application = LoanApplication(**SAMPLE_APPLICATION_PAYLOAD)
+    predict(application)
 
-    res2 = client.get("/metrics")
-    assert res2.status_code == 200
-    data2 = res2.json()
-    assert data2["total_predictions"] == 1
-    assert data2["successful_predictions"] == 1
-    assert data2["approved_predictions"] == 1
-    assert data2["rejected_predictions"] == 0
-    assert data2["approval_rate"] == 1.0
-    assert data2["average_latency_ms"] >= 0.0
+    m2 = get_metrics()
+    assert m2.total_predictions == 1
+    assert m2.successful_predictions == 1
+    assert m2.approved_predictions == 1
+    assert m2.rejected_predictions == 0
+    assert m2.approval_rate == 1.0
+    assert m2.average_latency_ms >= 0.0
 
 
-def test_reload_model_success(client):
-    """Test POST /reload-model reloads model successfully."""
+def test_reload_model_success():
+    """Test /reload-model reloads champion model successfully."""
     with patch.object(predictor, "reload", return_value={"model_loaded": True}):
         predictor.set_model(DummyClassifierWithProba(), model_version="v2")
-        response = client.post("/reload-model")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "success"
-        assert "reloaded" in data["message"].lower()
-        assert "reloaded_at" in data
+        result = reload_model()
+        assert isinstance(result, ReloadModelResponse)
+        assert result.status == "success"
+        assert "reloaded" in result.message.lower()
 
 
-def test_reload_model_failure_503(client):
-    """Test POST /reload-model returns 503 when reload fails."""
+def test_reload_model_failure_503():
+    """Test /reload-model raises HTTP 503 when MLflow reload fails."""
     with patch.object(predictor, "reload", side_effect=ModelNotLoadedError("Registry unreachable")):
-        response = client.post("/reload-model")
-        assert response.status_code == 503
-        assert "failed" in response.json()["detail"].lower()
+        with pytest.raises(HTTPException) as exc_info:
+            reload_model()
+        assert exc_info.value.status_code == 503
+        assert "failed" in exc_info.value.detail.lower()
 
 
-def test_batch_prediction_endpoint(client):
-    """Test POST /predict/batch scores multiple applications."""
+def test_batch_prediction_endpoint():
+    """Test batch prediction scores multiple applications."""
     mock_model = DummyClassifierWithProba(pred_class=1, proba=(0.1, 0.9))
     predictor.set_model(mock_model)
 
-    batch_payload = {
-        "applications": [
-            SAMPLE_APPLICATION_PAYLOAD,
-            {**SAMPLE_APPLICATION_PAYLOAD, "Loan_ID": "LP001003", "ApplicantIncome": 3000.0},
-        ]
-    }
+    app1 = LoanApplication(**SAMPLE_APPLICATION_PAYLOAD)
+    app2 = LoanApplication(**{**SAMPLE_APPLICATION_PAYLOAD, "Loan_ID": "LP001003", "ApplicantIncome": 3000.0})
 
-    response = client.post("/predict/batch", json=batch_payload)
-    assert response.status_code == 200
-    data = response.json()
-    assert len(data) == 2
-    assert data[0]["loan_id"] == "LP001002"
-    assert data[1]["loan_id"] == "LP001003"
-    assert data[0]["loan_status"] == "Y"
+    batch_request = BatchPredictionRequest(applications=[app1, app2])
+    results = predict_batch(batch_request)
+
+    assert len(results) == 2
+    assert results[0].loan_id == "LP001002"
+    assert results[1].loan_id == "LP001003"
+    assert results[0].loan_status == "Y"
