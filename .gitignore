@@ -88,3 +88,8 @@ desktop.ini
 !api/**
 !monitoring/**
 
+__pycache__/
+*.py[cod]
+
+# Local datasets
+/data/raw/*.csv
