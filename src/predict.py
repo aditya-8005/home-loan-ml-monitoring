@@ -14,10 +14,16 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
-import mlflow
-import mlflow.pyfunc
-import mlflow.sklearn
-from mlflow.tracking import MlflowClient
+try:
+    import mlflow
+    import mlflow.pyfunc
+    import mlflow.sklearn
+    from mlflow.tracking import MlflowClient
+    MLFLOW_AVAILABLE = True
+except ImportError:
+    mlflow = None
+    MlflowClient = None
+    MLFLOW_AVAILABLE = False
 
 from src.config import (
     MLFLOW_MODEL_URI,
@@ -114,6 +120,11 @@ class ChampionModelPredictor:
         """
         if self.is_loaded and not force_reload:
             return self._model
+
+        if not MLFLOW_AVAILABLE:
+            raise ModelNotLoadedError(
+                "MLflow is not installed in the current Python environment."
+            )
 
         mlflow.set_tracking_uri(self.tracking_uri)
 
