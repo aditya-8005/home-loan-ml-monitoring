@@ -1,0 +1,2 @@
+"""Streamlit monitoring dashboard application."""
+
