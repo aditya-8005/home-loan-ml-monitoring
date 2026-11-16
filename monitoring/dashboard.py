@@ -8,7 +8,13 @@ performance comparisons before and after retraining.
 from datetime import datetime
 import json
 from pathlib import Path
+import sys
 from typing import Any, Dict
+
+# Ensure project root is in sys.path when executed via streamlit
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import pandas as pd
 import streamlit as st

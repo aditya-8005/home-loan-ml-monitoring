@@ -556,11 +556,13 @@ def load_reference_data(filepath: Optional[Union[str, Path]] = None) -> pd.DataF
     """
     if filepath is not None:
         target_path = Path(filepath)
-        if not target_path.exists():
-            raise FileNotFoundError(
-                f"Reference dataset not found at '{target_path}'."
-            )
-        return pd.read_csv(target_path)
+        if target_path.exists():
+            return pd.read_csv(target_path)
+        if target_path == DEFAULT_REFERENCE_PATH and DEFAULT_TRAIN_PATH.exists():
+            return pd.read_csv(DEFAULT_TRAIN_PATH)
+        raise FileNotFoundError(
+            f"Reference dataset not found at '{target_path}'."
+        )
 
     # Check default candidates in priority order
     for candidate in [DEFAULT_REFERENCE_PATH, DEFAULT_TRAIN_PATH]:
@@ -754,7 +756,12 @@ def run_drift_detection(
     and production (data/raw/test.csv) datasets, executes detect_drift(), optionally
     saves the report artifact to disk, and records the drift event to metrics_tracker.
     """
-    ref = reference_data if reference_data is not None else DEFAULT_REFERENCE_PATH
+    if reference_data is not None:
+        ref = reference_data
+    elif DEFAULT_REFERENCE_PATH.exists():
+        ref = DEFAULT_REFERENCE_PATH
+    else:
+        ref = DEFAULT_TRAIN_PATH
     prod = production_data if production_data is not None else DEFAULT_PRODUCTION_PATH
 
     report = detect_drift(
