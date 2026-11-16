@@ -208,7 +208,7 @@ def _load_champion_from_mlflow(
         ) from exc
 
 
-def orchestrate_retraining(
+def _orchestrate_retraining_impl(
     drift_report: Optional[Union[DriftReport, Dict[str, Any]]] = None,
     new_training_data_path: Optional[Union[str, Path]] = None,
     evaluation_data_path: Optional[Union[str, Path]] = None,
@@ -675,3 +675,97 @@ def orchestrate_retraining(
         evaluation_source=evaluation_source,
         comparison=comparison,
     )
+
+
+def _record_retraining_metrics(
+    payload: Dict[str, Any], tracker: Optional[Any] = None
+) -> None:
+    """Record retraining outcome to metrics_tracker safely without raising exceptions."""
+    try:
+        if tracker is None:
+            from monitoring.metrics import metrics_tracker as default_tracker
+
+            active_tracker = default_tracker
+        else:
+            active_tracker = tracker
+
+        status = payload.get("status", "failed")
+        promoted = payload.get("promoted", False)
+        # Only mark as successful promotion if status is strictly "promoted"
+        is_successful_promotion = (status == "promoted") and bool(promoted)
+
+        # Retraining was successful if it reached an expected terminal outcome
+        # (promoted, rejected_no_improvement, skipped_no_drift, skipped_inconclusive)
+        success = status in (
+            "promoted",
+            "rejected_no_improvement",
+            "skipped_no_drift",
+            "skipped_inconclusive",
+        )
+
+        champ_score = payload.get("champion_score")
+        cand_score = payload.get("candidate_score")
+        cand_version = (
+            str(payload.get("candidate_version"))
+            if is_successful_promotion and payload.get("candidate_version") is not None
+            else None
+        )
+        metric_name = payload.get("metric_evaluated", "f1_score")
+
+        details = {
+            "status": status,
+            "message": payload.get("message"),
+            "evaluation_source": payload.get("evaluation_source"),
+            "drift_detected": payload.get("drift_detected"),
+            "drift_percentage": payload.get("drift_percentage"),
+        }
+
+        active_tracker.record_retraining_event(
+            success=success,
+            promoted=is_successful_promotion,
+            champion_score=champ_score,
+            candidate_score=cand_score,
+            new_model_version=cand_version,
+            evaluation_metric=metric_name,
+            details=details,
+        )
+    except Exception as exc:
+        logger.error("Failed to record retraining event to metrics store: %s", exc)
+
+
+def orchestrate_retraining(
+    drift_report: Optional[Union[DriftReport, Dict[str, Any]]] = None,
+    new_training_data_path: Optional[Union[str, Path]] = None,
+    evaluation_data_path: Optional[Union[str, Path]] = None,
+    primary_metric: str = "f1_score",
+    min_improvement: float = 0.0,
+    force_retrain: bool = False,
+    enable_mlflow: bool = True,
+    tracking_uri: Optional[str] = None,
+    model_name: Optional[str] = None,
+    experiment_name: Optional[str] = "home-loan-experiments",
+    record_metrics: bool = True,
+    metrics_tracker: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Execute end-to-end retraining gatekeeper, candidate training, evaluation, promotion, and metrics recording.
+
+    Wraps the core retraining pipeline, executes champion promotion, and records the
+    outcome to the central MetricsStore.
+    """
+    payload = _orchestrate_retraining_impl(
+        drift_report=drift_report,
+        new_training_data_path=new_training_data_path,
+        evaluation_data_path=evaluation_data_path,
+        primary_metric=primary_metric,
+        min_improvement=min_improvement,
+        force_retrain=force_retrain,
+        enable_mlflow=enable_mlflow,
+        tracking_uri=tracking_uri,
+        model_name=model_name,
+        experiment_name=experiment_name,
+    )
+
+    if record_metrics:
+        _record_retraining_metrics(payload, tracker=metrics_tracker)
+
+    return payload
