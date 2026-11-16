@@ -260,14 +260,163 @@ pytest -v -s
 - Provides interactive visual summaries of data drift metrics, historical prediction distributions, and active champion model details.
 
 ### Docker Usage (Planned)
-In future milestones, the system will be containerized using Docker Desktop:
-- **FastAPI Container:** Exposes the REST inference service.
-- **Streamlit Container:** Exposes the monitoring dashboard.
-- **Docker Compose:** Coordinates the API, dashboard, and MLflow services within a unified local network.
+The system is containerized using Docker and Docker Compose. For the full containerized deployment guide, service architectures, and commands, see [Section 12: Docker Deployment](#12-docker-deployment).
 
 ---
 
-## 12. Team Collaboration and Git Branching Workflow
+## 12. Docker Deployment
+
+The project provides full containerization using Docker and Docker Compose, orchestrating three services on an isolated bridge network (`home-loan-network`):
+- **MLflow Tracking Server & Model Registry** (Port 5000)
+- **FastAPI Inference Service** (Port 8000)
+- **Streamlit Monitoring Dashboard** (Port 8501)
+
+### 12.1. Prerequisites
+
+- **Docker Desktop** installed and running on Windows, macOS, or Linux.
+- **Docker Compose** installed (Docker Compose v2 `docker compose` or standalone Compose v1 `docker-compose`).
+- **Required Host Ports:** Ensure ports `5000`, `8000`, and `8501` are not in use by other local applications.
+- **Port Customization:** If host port conflicts exist, configure alternative host ports by overriding `MLFLOW_PORT`, `API_PORT`, or `DASHBOARD_PORT` in your local `.env` file without altering container definitions.
+
+### 12.2. Environment Configuration
+
+Initialize the local environment configuration file from the template before launching containers:
+
+```powershell
+# Windows PowerShell
+Copy-Item .env.example .env
+
+# Linux / macOS
+cp .env.example .env
+```
+
+*(Note: `.env` is excluded by `.gitignore` and `.dockerignore` to prevent local configurations from leaking into version control or Docker build contexts.)*
+
+**Configurable Environment Variables:**
+- `MLFLOW_TRACKING_URI`: Defaults to `http://localhost:5000` for running Python scripts on the host against the published MLflow container. Within Docker Compose, container-to-container communication is automatically configured to use Docker internal DNS: `http://mlflow:5000`.
+- `MODEL_NAME`: Name of the registered model in MLflow (default: `HomeLoanClassifier`).
+- `MODEL_ALIAS`: Target model alias for production inference (default: `champion`).
+- `MLFLOW_PORT`: Published host port for the MLflow UI (default: `5000`).
+- `API_PORT`: Published host port for the FastAPI service (default: `8000`).
+- `DASHBOARD_PORT`: Published host port for the Streamlit dashboard (default: `8501`).
+
+### 12.3. Deployment Commands
+
+The following commands use Docker Compose v2 syntax (`docker compose`). If using standalone Compose v1, use `docker-compose` instead.
+
+```powershell
+# 1. Build container images and start all services in detached mode
+docker compose up --build -d
+
+# 2. Check service status and healthcheck conditions
+docker compose ps
+
+# 3. View streaming aggregated logs from all services
+docker compose logs -f
+
+# 4. View streaming logs for an individual service
+docker compose logs -f api
+docker compose logs -f mlflow
+docker compose logs -f dashboard
+
+# 5. Restart services
+docker compose restart
+
+# 6. Stop all services (preserves database and artifact volumes)
+docker compose down
+```
+
+### 12.4. Service URLs and Verification
+
+Once services are running and report healthy status in `docker compose ps`, access and verify each service:
+
+| Service | Host URL | Description | Verification Method |
+| :--- | :--- | :--- | :--- |
+| **MLflow UI** | [http://localhost:5000](http://localhost:5000) | Tracking server & Model Registry | Open in browser; check `/health` returns HTTP 200 |
+| **FastAPI Swagger Docs** | [http://localhost:8000/docs](http://localhost:8000/docs) | Interactive OpenAPI documentation | Open in browser to explore and execute endpoints |
+| **FastAPI Health** | [http://localhost:8000/health](http://localhost:8000/health) | Service & model availability check | `curl http://localhost:8000/health` |
+| **Streamlit Dashboard** | [http://localhost:8501](http://localhost:8501) | Live metrics & drift observability | Open in browser |
+
+**Verifying Service Health via CLI:**
+```powershell
+# Inspect FastAPI health status
+curl http://localhost:8000/health
+
+# Inspect MLflow server health
+curl http://localhost:5000/health
+```
+
+### 12.5. First-Time Model Initialization (Cold-Start)
+
+#### Cold-Start Behavior
+When launching the container stack for the first time, the MLflow database is empty. FastAPI starts up gracefully in **degraded mode** (`status: "degraded"`, `model_loaded: false`) because no model version tagged with alias `champion` exists in the registry. The API service endpoints remain operational, but prediction requests will return HTTP 503 until a champion model is trained and registered.
+
+#### Initial Training and Champion Registration
+To train the baseline model and register it as `champion` in the MLflow Model Registry, execute the training pipeline inside the running `home-loan-api` container:
+
+```powershell
+docker compose exec api python -c "from src.train import run_training; run_training(enable_mlflow=True)"
+```
+*(Compose v1 alternative: `docker-compose exec api python -c "from src.train import run_training; run_training(enable_mlflow=True)"`)*
+
+> **Implementation Note on `enable_mlflow=True`:**
+> In `src/train.py`, the CLI block `if __name__ == "__main__":` invokes `run_training()` with its default parameter `enable_mlflow=False` (which only trains and evaluates validation metrics locally without logging). To log parameters, validation metrics, confusion matrix artifacts, and automatically register the model under `HomeLoanClassifier` with the `champion` alias, `enable_mlflow=True` **must** be explicitly passed.
+
+#### Verifying the Model in MLflow
+1. Open the MLflow UI in your browser at [http://localhost:5000](http://localhost:5000).
+2. Click on the **Models** tab in the top navigation bar.
+3. Verify that `HomeLoanClassifier` is present.
+4. Click into `HomeLoanClassifier` and confirm that **Version 1** has the alias **`champion`** assigned.
+
+#### Reloading the Model in FastAPI
+Once the champion model is registered in MLflow, trigger FastAPI's dynamic reload endpoint without restarting the container:
+
+```powershell
+curl -X POST http://localhost:8000/reload-model
+```
+
+Verify that the API status transitions from `degraded` to `healthy`:
+```powershell
+curl http://localhost:8000/health
+```
+
+Expected response:
+```json
+{
+  "status": "healthy",
+  "model_loaded": true,
+  "model_name": "HomeLoanClassifier",
+  "model_alias": "champion",
+  "model_version": "1",
+  "uptime_seconds": 120.5,
+  "timestamp": "2026-11-16T12:00:00+00:00"
+}
+```
+
+### 12.6. Storage and Persistence
+
+Docker Compose defines three dedicated named volumes:
+
+- **`mlflow_db`** (mounted at `/mlflow-db` in `mlflow`):
+  Persists the SQLite database (`sqlite:////mlflow-db/mlflow.db`) containing experiment metadata, run parameters, metrics, tags, and model registry records.
+- **`mlflow_artifacts`** (mounted at `/mlflow-artifacts` in `mlflow` [read-write] and `api` [read-write]):
+  Stores serialized model pipelines and file artifacts logged during training runs. Both containers require read-write access because MLflow uses a direct local filesystem artifact store, and the API training process writes model artifacts directly to this shared volume. Both services share the identical path `/mlflow-artifacts`, ensuring direct local filesystem resolution without cross-container URI mismatch.
+- **`shared_reports`** (mounted at `/app/reports` in `api` and `dashboard`):
+  Stores runtime monitoring data, specifically `reports/metrics.json`. The FastAPI service appends live inference metrics and prediction counts, while the Streamlit dashboard reads this file to render real-time observability charts.
+
+**Volume Lifecycle Management:**
+- Running `docker compose down` stops and removes containers while **preserving** all named volumes and persisted data.
+- Running `docker compose down -v` permanently **deletes** the named volumes, erasing MLflow tracking records, registered models, and recorded monitoring metrics.
+
+### 12.7. Operational Limitations
+
+- **Cold-Start Degraded Mode:** On first launch or after volume resets (`docker compose down -v`), FastAPI starts in `degraded` mode until the initial champion model is trained and registered.
+- **No Background Task Scheduler:** While data drift detection (`src/drift_detection.py`) and automated retraining logic (`src/retrain.py`) are fully implemented and verified in the codebase, a background scheduling mechanism (such as Celery, Airflow, or Cron) is **not yet implemented**.
+- **Manual Triggering:** Starting Docker Compose boots the services (MLflow, API, Dashboard) but does not automatically execute training runs, run drift checks, or trigger model retraining without external calls.
+
+---
+
+## 13. Team Collaboration and Git Branching Workflow
 
 To maintain code quality in a collaborative college environment, adhere to the following workflow:
 
@@ -298,7 +447,7 @@ To maintain code quality in a collaborative college environment, adhere to the f
 
 ---
 
-## 13. Future Implementation Milestones
+## 14. Future Implementation Milestones
 
 - **Milestone 1 (Current):** Project foundation, directory scaffolding, dependencies, and documentation.
 - **Milestone 2:** Data loading, exploratory data analysis, and preprocessing pipeline (`src/preprocessing.py`).

@@ -1,0 +1,66 @@
+# Version control & CI
+.git/
+.github/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+ENV/
+
+# Python byte-code & caches
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+
+# Testing & quality caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# IDE & editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# Environment variables & local secrets
+.env
+.env.local
+.env.*.local
+*.env
+!.env.example
+
+# MLflow runtime database & artifacts
+mlruns/
+mlartifacts/
+mlflow.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Runtime monitoring data & generated reports
+reports/
+
+# Temporary logs & build artifacts
+build/
+dist/
+*.egg-info/
+tmp/
+temp/
+*.log
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+desktop.ini

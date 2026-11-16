@@ -1,0 +1,92 @@
+services:
+  mlflow:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: home-loan-mlflow
+    restart: unless-stopped
+    ports:
+      - "${MLFLOW_PORT:-5000}:5000"
+    command: mlflow server --backend-store-uri sqlite:////mlflow-db/mlflow.db --default-artifact-root /mlflow-artifacts --host 0.0.0.0 --port 5000 --allowed-hosts "mlflow:5000,localhost:*,127.0.0.1:*"
+    environment:
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - mlflow_db:/mlflow-db
+      - mlflow_artifacts:/mlflow-artifacts
+    networks:
+      - home-loan-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: home-loan-api
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    environment:
+      MLFLOW_TRACKING_URI: "http://mlflow:5000"
+      API_HOST: "0.0.0.0"
+      API_PORT: "8000"
+      MODEL_NAME: "${MODEL_NAME:-HomeLoanClassifier}"
+      MODEL_ALIAS: "${MODEL_ALIAS:-champion}"
+      PYTHONPATH: "/app"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - mlflow_artifacts:/mlflow-artifacts
+      - shared_reports:/app/reports
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    networks:
+      - home-loan-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: home-loan-dashboard
+    restart: unless-stopped
+    ports:
+      - "${DASHBOARD_PORT:-8501}:8501"
+    command: streamlit run monitoring/dashboard.py --server.port 8501 --server.address 0.0.0.0 --server.headless true
+    environment:
+      MLFLOW_TRACKING_URI: "http://mlflow:5000"
+      STREAMLIT_SERVER_PORT: "8501"
+      STREAMLIT_SERVER_ADDRESS: "0.0.0.0"
+      STREAMLIT_SERVER_HEADLESS: "true"
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+      PYTHONPATH: "/app"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - shared_reports:/app/reports
+    networks:
+      - home-loan-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  mlflow_db:
+  mlflow_artifacts:
+  shared_reports:
+
+networks:
+  home-loan-network:
+    driver: bridge
