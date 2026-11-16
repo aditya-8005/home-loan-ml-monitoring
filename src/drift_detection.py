@@ -607,6 +607,8 @@ def detect_drift(
     categorical_features: Optional[List[str]] = None,
     p_value_threshold: float = DEFAULT_P_VALUE_THRESHOLD,
     drift_share_threshold: float = DEFAULT_DRIFT_SHARE_THRESHOLD,
+    record_metrics: bool = False,
+    metrics_tracker: Optional[Any] = None,
 ) -> DriftReport:
     """Execute end-to-end data drift detection comparing reference vs production datasets.
 
@@ -628,6 +630,10 @@ def detect_drift(
     drift_share_threshold : float, default=0.20
         Fraction [0, 1] or percentage [0, 100] of drifted valid features required
         to flag overall dataset drift (default=0.20 or 20%).
+    record_metrics : bool, default=False
+        Whether to record drift evaluation outcome to the metrics store.
+    metrics_tracker : Any | None, default=None
+        Custom MetricsStore instance to record event into (uses global singleton if None).
 
     Returns
     -------
@@ -709,6 +715,62 @@ def detect_drift(
         p_value_threshold=valid_p_val,
         drift_share_threshold=valid_norm_share,
     )
+
+    if record_metrics:
+        try:
+            if metrics_tracker is None:
+                from monitoring.metrics import metrics_tracker as default_tracker
+
+                tracker = default_tracker
+            else:
+                tracker = metrics_tracker
+
+            tracker.record_drift_event(
+                is_drift_detected=report.is_drift_detected,
+                drift_percentage=report.drift_percentage,
+                drifted_features=report.drifted_features,
+                status=report.status,
+            )
+        except Exception as exc:
+            logger.error("Failed to record drift event to metrics store: %s", exc)
+
+    return report
+
+
+def run_drift_detection(
+    reference_data: Optional[Union[pd.DataFrame, str, Path]] = None,
+    production_data: Optional[Union[pd.DataFrame, str, Path]] = None,
+    numerical_features: Optional[List[str]] = None,
+    categorical_features: Optional[List[str]] = None,
+    p_value_threshold: float = DEFAULT_P_VALUE_THRESHOLD,
+    drift_share_threshold: float = DEFAULT_DRIFT_SHARE_THRESHOLD,
+    save_report_path: Optional[Union[str, Path]] = None,
+    record_metrics: bool = True,
+    metrics_tracker: Optional[Any] = None,
+) -> DriftReport:
+    """Execute workflow-level drift detection and record metrics to central store.
+
+    Resolves default reference (data/reference/reference.csv or data/raw/train.csv)
+    and production (data/raw/test.csv) datasets, executes detect_drift(), optionally
+    saves the report artifact to disk, and records the drift event to metrics_tracker.
+    """
+    ref = reference_data if reference_data is not None else DEFAULT_REFERENCE_PATH
+    prod = production_data if production_data is not None else DEFAULT_PRODUCTION_PATH
+
+    report = detect_drift(
+        reference_data=ref,
+        production_data=prod,
+        numerical_features=numerical_features,
+        categorical_features=categorical_features,
+        p_value_threshold=p_value_threshold,
+        drift_share_threshold=drift_share_threshold,
+        record_metrics=record_metrics,
+        metrics_tracker=metrics_tracker,
+    )
+
+    if save_report_path:
+        save_drift_report(report, save_report_path)
+
     return report
 
 

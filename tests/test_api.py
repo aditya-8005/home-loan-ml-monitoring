@@ -37,9 +37,10 @@ class DummyClassifierWithoutProba:
 
 @pytest.fixture
 def client():
-    """Create FastAPI test client."""
-    with TestClient(app) as test_client:
-        yield test_client
+    """Create FastAPI test client with mocked startup model loading."""
+    with patch.object(predictor, "load_model", return_value=None):
+        with TestClient(app) as test_client:
+            yield test_client
 
 
 @pytest.fixture(autouse=True)
