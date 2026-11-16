@@ -153,6 +153,7 @@ class TestTrain(unittest.TestCase):
             expected_keys = [
                 "model",
                 "preprocessor",
+                "pipeline",
                 "metrics",
                 "X_train",
                 "X_val",

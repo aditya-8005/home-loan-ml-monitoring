@@ -1,8 +1,9 @@
 """Model training pipeline for the Home Loan Prediction project.
 
 This module provides reusable functions to train a DecisionTreeClassifier
-with an isolated preprocessing pipeline, avoiding data leakage, and an
-orchestration function to execute the full training, validation, and evaluation workflow.
+with an isolated preprocessing pipeline, avoiding data leakage, construct
+an end-to-end inference Pipeline, and execute the full training, validation,
+and MLflow tracking workflow.
 """
 
 from pathlib import Path
@@ -10,10 +11,12 @@ from typing import Any, Dict, Optional, Union
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
 from sklearn.tree import DecisionTreeClassifier
 
 from src.data_loader import get_features_and_target, load_training_data
-from src.evaluate import evaluate_model
+from src.evaluate import evaluate_model, get_classification_report
+from src.mlflow_tracking import build_pipeline, log_training_run
 from src.preprocessing import fit_transform_features, transform_features
 
 
@@ -80,17 +83,23 @@ def run_training(
     filepath: Optional[Union[str, Path]] = None,
     test_size: float = 0.20,
     random_state: int = 42,
+    enable_mlflow: bool = False,
+    tracking_uri: Optional[str] = None,
+    experiment_name: str = "home-loan-experiments",
+    model_name: Optional[str] = None,
+    model_alias: Optional[str] = "champion",
 ) -> Dict[str, Any]:
-    """Orchestrate the end-to-end training and evaluation workflow.
+    """Orchestrate the end-to-end training, evaluation, and optional MLflow tracking workflow.
 
     Workflow:
     1. Load the training dataset using load_training_data().
     2. Separate features (X) and target (y) using get_features_and_target().
     3. Perform stratified train-validation split (default 80/20).
     4. Fit preprocessing ONLY on X_train and train model using train_model().
-    5. Transform X_validation using the fitted preprocessor (no refitting).
-    6. Generate validation predictions.
-    7. Evaluate predictions using evaluate_model().
+    5. Construct an end-to-end Pipeline without refitting components.
+    6. Transform X_validation using the fitted preprocessor (no refitting).
+    7. Generate validation predictions and evaluate metrics.
+    8. Optionally log experiment run, artifacts, and register champion model with MLflow.
 
     Parameters
     ----------
@@ -100,6 +109,16 @@ def run_training(
         Proportion of dataset to reserve for validation.
     random_state : int, default=42
         Random seed for train_test_split and model initialization.
+    enable_mlflow : bool, default=False
+        Whether to log parameters, metrics, artifacts, and model to MLflow.
+    tracking_uri : str | None, default=None
+        Custom MLflow tracking URI. If None, uses default from configuration.
+    experiment_name : str, default='home-loan-experiments'
+        MLflow experiment name.
+    model_name : str | None, default=None
+        Registered model name. If None, defaults to MODEL_NAME from config.
+    model_alias : str | None, default=None
+        Model alias (e.g. 'champion'). If None, defaults to MODEL_ALIAS from config.
 
     Returns
     -------
@@ -107,12 +126,14 @@ def run_training(
         Dictionary containing:
         - 'model': Trained DecisionTreeClassifier.
         - 'preprocessor': Fitted ColumnTransformer.
+        - 'pipeline': Fitted end-to-end Scikit-learn Pipeline.
         - 'metrics': Evaluation metrics dictionary (accuracy, precision, recall, f1, cm).
         - 'X_train': Training features DataFrame.
         - 'X_val': Validation features DataFrame.
         - 'y_train': Training target labels.
         - 'y_val': Validation target labels.
         - 'y_pred': Model predictions on validation data.
+        - 'mlflow': Optional dict of MLflow run details (if enable_mlflow=True).
     """
     # 1. Ingest raw data
     df = load_training_data(filepath=filepath)
@@ -138,18 +159,22 @@ def run_training(
     model = training_artifacts["model"]
     preprocessor = training_artifacts["preprocessor"]
 
-    # 5. Transform validation features with the pre-fitted preprocessor
+    # 5. Assemble end-to-end Pipeline without refitting
+    pipeline = build_pipeline(preprocessor=preprocessor, model=model)
+
+    # 6. Transform validation features with the pre-fitted preprocessor
     X_val_transformed = transform_features(preprocessor, X_val)
 
-    # 6. Generate predictions on validation set
+    # 7. Generate predictions on validation set
     y_pred = model.predict(X_val_transformed)
 
-    # 7. Evaluate validation performance
+    # 8. Evaluate validation performance
     metrics = evaluate_model(y_true=y_val, y_pred=y_pred)
 
-    return {
+    results: Dict[str, Any] = {
         "model": model,
         "preprocessor": preprocessor,
+        "pipeline": pipeline,
         "metrics": metrics,
         "X_train": X_train,
         "X_val": X_val,
@@ -157,6 +182,32 @@ def run_training(
         "y_val": y_val,
         "y_pred": y_pred,
     }
+
+    # 9. Optionally log to MLflow tracking server and register model
+    if enable_mlflow:
+        params: Dict[str, Any] = {
+            "random_state": random_state,
+            "test_size": test_size,
+            "model_type": type(model).__name__,
+            "criterion": model.criterion,
+            "max_depth": str(model.max_depth),
+            "min_samples_split": model.min_samples_split,
+        }
+        report_text = get_classification_report(y_true=y_val, y_pred=y_pred)
+        mlflow_info = log_training_run(
+            pipeline=pipeline,
+            metrics=metrics,
+            params=params,
+            tracking_uri=tracking_uri,
+            experiment_name=experiment_name,
+            model_name=model_name or "HomeLoanClassifier",
+            model_alias=model_alias,
+            register_model=True,
+            classification_report_text=report_text,
+        )
+        results["mlflow"] = mlflow_info
+
+    return results
 
 
 if __name__ == "__main__":
